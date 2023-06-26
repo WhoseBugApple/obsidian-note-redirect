@@ -5,9 +5,6 @@ import { App, Editor, EditorPosition, EditorSuggest, EditorSuggestContext, Edito
 //     [Obsidian Developer Documentation](https://docs.obsidian.md/Home)
 //   suggest & modal
 //     [main.ts - obsidian-redirect - jglev - Github](https://github.com/jglev/obsidian-redirect/blob/main/main.ts#L155)
-//   open file
-//     [await openFile( - Github](https://github.com/chhoumann/quickadd/blob/f304a446e66c9d0fbaa3cf61b69ee926ffba9238/src/engine/CaptureChoiceEngine.ts#L100)
-//     [function openFile( - Github](https://github.com/chhoumann/quickadd/blob/master/src/utilityObsidian.ts#L128)
 
 export default class RedirectorPlugin extends Plugin {
 	async onload() {
@@ -20,8 +17,7 @@ export default class RedirectorPlugin extends Plugin {
 				if (redirectFiles.length == 0) return;
 				
 				// report links to redirect files
-				var reportPath = "redirector report.md";
-				this.createReport(redirectFiles, reportPath);
+				this.createReport(redirectFiles);
 			}
 		});
 	}
@@ -54,13 +50,22 @@ export default class RedirectorPlugin extends Plugin {
 		return redirectFiles;
 	}
 
-	async createReport(redirectFiles: TFile[], reportPath: string) {
-		// idle
-		await this.idle();
-		// delete report if exist
+	async createReport(redirectFiles: TFile[]) {
+		var reportPath = "redirector report.md";
 		var abstFile = app.vault.getAbstractFileByPath(reportPath);
-		if (abstFile) await app.vault.delete(abstFile);
+		if (abstFile) {
+			app.vault.delete(abstFile).then(() => {
+				this.doCreateReport(redirectFiles, reportPath);
+			})
+		} else {
+			this.doCreateReport(redirectFiles, reportPath);
+		}
+	}
+
+	async doCreateReport(redirectFiles: TFile[], reportPath: string) {
 		var reportText = '';
+		var reportFile = await app.vault.create(reportPath, '');
+		await app.workspace.getMostRecentLeaf()?.openFile(reportFile);
 		// report
 		var emptyReport = '';
 		// report each file
@@ -75,13 +80,13 @@ export default class RedirectorPlugin extends Plugin {
 				if (!linkedRedirectFile) return;
 				// report this link
 				var redirect: TFile = linkedRedirectFile;
-				var linkToRedirect = app.fileManager.generateMarkdownLink(redirect, reportPath);
+				var linkToRedirect = app.fileManager.generateMarkdownLink(redirect, reportFile.path);
 				reportForThisFile += '\t' + linkToRedirect + '\r\n';
 				
 			})
 			if (reportForThisFile != emptyReport) {
 				// if any report, add header (link to this file)
-				var linkToFile = app.fileManager.generateMarkdownLink(file, reportPath);
+				var linkToFile = app.fileManager.generateMarkdownLink(file, reportFile.path);
 				reportForThisFile = linkToFile + '\r\n' + reportForThisFile + '\r\n';
 			}
 			reportText += reportForThisFile;
@@ -89,20 +94,19 @@ export default class RedirectorPlugin extends Plugin {
 		if (reportText == emptyReport)
 			reportText = 'vault is clean';
 		// finish report
-		var reportFile = await app.vault.create(reportPath, '');
-		await this.openFile(reportFile);
 		app.vault.append(reportFile, reportText).then(() => {
 			new Notice("Report OK");
 		});
 	}
 
 	async openFile(
+		app: App,
 		file: TFile
 	) {
 		let leaf: WorkspaceLeaf;
 	
 		// open file in new tab
-		leaf = app.workspace.getLeaf('tab');
+		leaf = app.workspace.getLeaf("tab");
 		await leaf.openFile(file);
 	
 		// focus
@@ -119,6 +123,4 @@ export default class RedirectorPlugin extends Plugin {
 			},
 		});
 	}
-
-	async idle() {}
 }
