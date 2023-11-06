@@ -1,27 +1,55 @@
-import { App, Editor, EditorPosition, EditorSuggest, EditorSuggestContext, EditorSuggestTriggerInfo, FileManager, MarkdownView, MetadataCache, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile, TagCache, Vault, WorkspaceLeaf, normalizePath, parseFrontMatterEntry } from 'obsidian';
+import { link, readFile } from 'fs';
+import { App, CachedMetadata, Editor, EditorPosition, EditorSuggest, EditorSuggestContext, EditorSuggestTriggerInfo, FileManager, LinkCache, MarkdownView, MetadataCache, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, TFolder, TagCache, Vault, WorkspaceLeaf, normalizePath, parseFrontMatterEntry } from 'obsidian';
 
 // References
 //   general
 //     [Obsidian Developer Documentation](https://docs.obsidian.md/Home)
 //   suggest & modal
 //     [main.ts - obsidian-redirect - jglev - Github](https://github.com/jglev/obsidian-redirect/blob/main/main.ts#L155)
-//   open file
-//     [await openFile( - Github](https://github.com/chhoumann/quickadd/blob/f304a446e66c9d0fbaa3cf61b69ee926ffba9238/src/engine/CaptureChoiceEngine.ts#L100)
-//     [function openFile( - Github](https://github.com/chhoumann/quickadd/blob/master/src/utilityObsidian.ts#L128)
+//   file
+//     [Vault](https://docs.obsidian.md/Plugins/Vault)
+//     [Vault class](https://docs.obsidian.md/Reference/TypeScript+API/Vault)
+//     edit active file
+//       replace in active markdown file in edit mode
+//         [Editor](https://docs.obsidian.md/Plugins/Editor/Editor)
+//         [Editor class](https://docs.obsidian.md/Reference/TypeScript+API/Editor)
 
 export default class RedirectorPlugin extends Plugin {
 	async onload() {
 		this.addCommand({
-			id: 'report-links-to-redirect-files',
-			name: 'Report links to redirect files',
+			id: 'redirector-report-redirect-files',
+			name: 'Report redirect-files',
 			callback: () => {
-				// get redirect files
-				var redirectFiles: TFile[] = this.getRedirectFiles();
-				if (redirectFiles.length == 0) return;
-				
-				// report links to redirect files
-				var reportPath = "redirector report.md";
-				this.createReport(redirectFiles, reportPath);
+				this.command_reportRedirectFiles();
+			}
+		});
+		this.addCommand({
+			id: 'redirector-move-redirect-file-besides-its-target',
+			name: 'Move redirect-file besides its target',
+			callback: () => {
+				this.command_moveRedirectFilesBesidesItsTarget();
+			}
+		});
+		this.addCommand({
+			id: 'redirector-replace-links-to-redirect-file-with-links-to-its-target',
+			name: 'Replace links to redirect-file with links to its target',
+			callback: () => {
+				this.command_replaceLinksToRedirectFileWithLinksToItsTarget();
+			}
+		});
+		this.addCommand({
+			id: 'redirector-format-links',
+			name: 'Format links',
+			callback: () => {
+				this.command_formatLinks();
+			}
+		});
+		// TODO remove
+		this.addCommand({
+			id: 'redirector-test',
+			name: 'Test',
+			callback: () => {
+				this.command_test();
 			}
 		});
 	}
@@ -30,20 +58,127 @@ export default class RedirectorPlugin extends Plugin {
 
 	}
 
+	reportName: string = "redirect-files report.md";
+	parentOfReport_path: string = "";
+	reportPath: string = this.parentOfReport_path + this.reportName;
+	async command_reportRedirectFiles() {
+		// idle
+		await this.idle();
+
+		// get redirect files
+		var redirectFiles: TFile[] = await this.getRedirectFiles();
+		if (redirectFiles.length == 0) {
+			new Notice('report finished, NO redirect-file is found');
+			return;
+		}
+		
+		// report
+		await this.createReport(redirectFiles, this.reportPath, this.reportName, this.parentOfReport_path);
+	}
+
+	async command_moveRedirectFilesBesidesItsTarget() {
+		// idle
+		await this.idle();
+
+		// get redirect files
+		var redirectFiles: TFile[] = await this.getRedirectFiles();
+		if (redirectFiles.length == 0) {
+			new Notice('move finished, NO redirect-file is found');
+			return;
+		}
+
+		// move
+		var rFilesIterator: IterableIterator<TFile> = redirectFiles.values();
+		var count = await this.recursiveMoveRedirectFiles(rFilesIterator);
+		new Notice('move finished, ' + count + ' redirect-files are moved');
+	}
+
+	async command_replaceLinksToRedirectFileWithLinksToItsTarget() {
+		// idle
+		await this.idle();
+
+		// get redirect files
+		var redirectFiles: TFile[] = await this.getRedirectFiles();
+		if (redirectFiles.length == 0) {
+			new Notice('replace finished, NO redirect-file is found');
+			return;
+		}
+
+		// replace
+		var count = await this.replaceLinksToRedirectFilesWithLinksToItsTarget(redirectFiles);
+		new Notice('replace finished, ' + count + ' files are replaced');
+	}
+
+	// TODO optimize
+	async command_formatLinks() {
+		// idle
+		await this.idle();
+
+		var filesChanged = await this.refreshAllLinks();
+		new Notice('format finished, ' + filesChanged + ' files are changed');
+		console.log(`${filesChanged} files are changed`);
+		return;
+	}
+
+	// TODO remove
+	async command_test() {
+		await this.test();
+	}
+
+	// for each redirect-file, move it if necessary
+	// return count of moved
+	async recursiveMoveRedirectFiles(rFilesIterator: IterableIterator<TFile>): Promise<number> {
+		var nextElementContainer = rFilesIterator.next();
+		if (nextElementContainer.done) return 0;
+		var rFile: TFile = nextElementContainer.value;
+		
+		// handle current
+		var isMove = await this.moveIfNecessary(rFile);
+
+		// next
+		var count = await this.recursiveMoveRedirectFiles(rFilesIterator);
+		return count + (isMove ? 1 : 0);
+	}
+
+	async moveIfNecessary(redirectFile: TFile): Promise<boolean> {
+		var rFile: TFile = redirectFile;
+
+		// get link
+		var links = this.tryGetLinks(rFile);
+		if (!links) return false;
+		if (links.length != 1) return false;
+		var link = links.at(0);
+		if (!(link?.link)) return false;
+
+		// get target
+		var targetFile = this.tryGetLinkTarget(link.link, rFile.path);
+		if (!targetFile) return false;
+		
+		// NOT move if same path
+		if (targetFile.parent?.path == rFile.parent?.path) return false;
+
+		// need to move
+		var newDir = targetFile.parent?.path;
+		if (!newDir) newDir = '';
+		var newPath = this.concatDirectoryPathAndFileName(newDir, rFile.name);
+		await this.moveOrRename_fileOrDirectory(rFile, newPath);
+
+		return true;
+	}
+
 	getRedirectFiles(): TFile[] {
 		var redirectFiles: TFile[] = app.vault.getMarkdownFiles().filter((file, idx, files) => {
-
-			var redirectTags = app.metadataCache.getFileCache(file)?.tags?.filter((tag, idx, tags) => {
+			var someTagSatisfy = this.tryGetFileMetadata(file)?.tags?.some((tag, idx, tags) => {
 				return tag.tag.toLowerCase() == "#redirect";
 			});
-			var isTagSayRedirect = redirectTags && (redirectTags.length != 0);
+			var isTagSayRedirect = someTagSatisfy;
 			if (isTagSayRedirect) {
 				return true;
 			}
 
-			var frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
-			var yamlProp = parseFrontMatterEntry(frontmatter, 'redirect');
-			var isYamlSayDirect = yamlProp == true;
+			var frontmatter = this.tryGetFileMetadata(file)?.frontmatter;
+			var yamlPropValue = parseFrontMatterEntry(frontmatter, 'redirect');
+			var isYamlSayDirect = yamlPropValue == true;
 			if (isYamlSayDirect) {
 				return true;
 			}
@@ -54,53 +189,269 @@ export default class RedirectorPlugin extends Plugin {
 		return redirectFiles;
 	}
 
-	async createReport(redirectFiles: TFile[], reportPath: string) {
-		// idle
-		await this.idle();
+	async createReport(redirectFiles: TFile[], 
+		reportFilePath: string, reportName: string, parentOfReport_path: string) {
 		// delete report if exist
-		var abstFile = app.vault.getAbstractFileByPath(reportPath);
-		if (abstFile) await app.vault.delete(abstFile);
-		var reportText = '';
-		// report
-		var emptyReport = '';
-		// report each file
-		app.vault.getMarkdownFiles().forEach((file, idx, files) => {
-			var reportForThisFile = emptyReport;
-			// report each link
-			app.metadataCache.getFileCache(file)?.links?.forEach((link, idx, links) => {
-				var linkedRedirectFile = redirectFiles.find((rfile, idx, rfiles) => {
-					var targetPath = app.metadataCache.getFirstLinkpathDest(link.link, file.path)?.path;
-					return rfile.path == targetPath;
-				})
-				if (!linkedRedirectFile) return;
-				// report this link
-				var redirect: TFile = linkedRedirectFile;
-				var linkToRedirect = app.fileManager.generateMarkdownLink(redirect, reportPath);
-				reportForThisFile += '\t' + linkToRedirect + '\r\n';
-				
-			})
-			if (reportForThisFile != emptyReport) {
-				// if any report, add header (link to this file)
-				var linkToFile = app.fileManager.generateMarkdownLink(file, reportPath);
-				reportForThisFile = linkToFile + '\r\n' + reportForThisFile + '\r\n';
-			}
-			reportText += reportForThisFile;
-		});
-		if (reportText == emptyReport)
-			reportText = 'vault is clean';
-		// finish report
-		var reportFile = await app.vault.create(reportPath, '');
-		await this.openFile(reportFile);
-		app.vault.append(reportFile, reportText).then(() => {
-			new Notice("Report OK");
-		});
+		await this.removeReportFile(reportFilePath);
+		var emptyReportText: string = '';
+		var reportText: string = await this.getReportText(redirectFiles, reportFilePath, emptyReportText);
+		await this.createReportFile(reportFilePath, reportText, emptyReportText);
 	}
 
+	async removeReportFile(reportFilePath: string) {
+		var file = this.tryGetFile(reportFilePath);
+		if (file) await app.vault.delete(file);
+	}
+
+	async getReportText(
+		redirectFiles: TFile[], reportFilePath: string, emptyReportText: string): Promise<string> {
+		var reportText: string = emptyReportText;
+		reportText += await this.getLinksToRedirectFilesReportText(redirectFiles, reportFilePath, emptyReportText);
+		reportText += await this.getIncorrectRedirectFilesPathReportText(redirectFiles, reportFilePath, emptyReportText);
+		return reportText;
+	}
+
+	// should NOT link to redirect files, should link to its target
+	async getLinksToRedirectFilesReportText(
+		redirectFiles: TFile[], reportFilePath: string, emptyReportText: string): Promise<string> {
+		return await this.getLinksToRedirectFilesReportText_traverseTheVault(redirectFiles, reportFilePath, emptyReportText);
+		// return await this.getLinksToRedirectFilesReportText_useHiddenAPIs(redirectFiles, reportFilePath, emptyReportText);
+	}
+
+	async getLinksToRedirectFilesReportText_traverseTheVault(
+		redirectFiles: TFile[], reportFilePath: string, emptyReportText: string): Promise<string> {
+		// report
+		var reportText: string = emptyReportText;
+		var path2OneOfMap = this.getPath2OneOfMap(redirectFiles);
+		// check each file
+		var badFileId = 0;
+		app.vault.getMarkdownFiles().forEach((file, idx, files) => {
+			var reportForThisFile = emptyReportText;
+			// check each link
+			this.tryGetFileMetadata(file)?.links?.forEach((link, idx, links) => {
+				var targetFile = this.tryGetLinkTarget(link.link, file.path);
+				if (targetFile == null) return;
+				var targetPath = targetFile.path;
+
+				// if good link then return
+				var targetIsRedirectFile = false;
+				if (path2OneOfMap.get(targetPath)) targetIsRedirectFile = true;
+				if (!targetIsRedirectFile) return;
+
+				// need to report this link, because its target is redirect file
+				var redirectFile: TFile = targetFile;
+				var linkToRedirectFile = this.generateMarkdownLink(redirectFile, reportFilePath);
+				reportForThisFile += linkToRedirectFile + '\n\n';
+			})
+			if (reportForThisFile != emptyReportText) {
+				// if any report, add extra-info (includes link to this file)
+				var prefix = '';
+				var headingForEntry = '## ' + badFileId + '\n';
+				var headingForFile = '### bad-file\n';
+				var linkToBadFile = this.generateMarkdownLink(file, reportFilePath) + '\n\n';
+				var headingForBadLinks = '### link to redirect-files\n';
+				prefix += headingForEntry + headingForFile + linkToBadFile + headingForBadLinks;
+				reportForThisFile = prefix + reportForThisFile;
+				reportText += reportForThisFile;
+				badFileId++;
+			}
+		});
+		if (reportText != emptyReportText) {
+			// if any report, add extra-info
+			reportText = '# should NOT link to Redirect-File\n' + reportText;
+		}
+		return reportText;
+	}
+
+	// very expensive (2023.11.03)
+	// is the API async? if it is, should await
+	async getLinksToRedirectFilesReportText_useHiddenAPIs(
+		redirectFiles: TFile[], reportFilePath: string, emptyReportText: string): Promise<string> {
+		// report
+		var reportText: string = emptyReportText;
+		var path2OneOfMap = this.getPath2OneOfMap(redirectFiles);
+		// check each redirect-file
+		var badRedirectFileId = 0;
+		redirectFiles.forEach((rFile, idx, rFiles) => {
+			var reportForThisFile = emptyReportText;
+			var backFiles: Array<TFile> = this.tryGetBackFiles_useHiddenAPIs(rFile);
+			backFiles.forEach((backFile: TFile, idx: number, backFiles: any) => {
+				var badFile = backFile;
+				var linkToBadFile = this.generateMarkdownLink(badFile, reportFilePath);
+				reportForThisFile += linkToBadFile + '\n\n';
+			});
+			if (reportForThisFile != emptyReportText) {
+				// if any report, add extra-info (includes link to this file)
+				var prefix = '';
+				var headingForEntry = '## ' + badRedirectFileId + '\n';
+				var headingForRedirectFile = '### redirect-file\n';
+				var linkToRedirectFile = this.generateMarkdownLink(rFile, reportFilePath) + '\n\n';
+				var headingForBadFiles = '### bad-files\n';
+				prefix += headingForEntry + headingForRedirectFile + linkToRedirectFile + headingForBadFiles;
+				reportForThisFile = prefix + reportForThisFile;
+				reportText += reportForThisFile;
+				badRedirectFileId++;
+			}
+		});
+		if (reportText != emptyReportText) {
+			// if any report, add extra-info
+			reportText = '# should NOT link to Redirect-File\n' + reportText;
+		}
+		return reportText;
+	}
+
+	// returns a special map, 
+	// input a path of a markdown-file, output is that markdown-file is one of redirect-files, 
+	// true stands for yes, undefined or false stands for no
+	getPath2OneOfMap(redirectFiles: TFile[]) {
+		var map = new Map<string, boolean>();
+		redirectFiles.forEach(rFile => {
+			map.set(rFile.path, true);
+		});
+		return map;
+	}
+
+	// if there is only 1 link in redirect files, then, 
+	// should put redirect files besides it's target, at the same directory
+	async getIncorrectRedirectFilesPathReportText(
+		redirectFiles: TFile[], reportFilePath: string, emptyReportText: string): Promise<string> {
+		// report
+		var reportText: string = emptyReportText;
+		// report each file
+		redirectFiles.forEach((rFile, idx, rFiles) => {
+			// get link
+			var metadata = this.tryGetFileMetadata(rFile);
+			var links = metadata?.links;
+			if (!links) return;
+			if (links.length != 1) return;
+			var link = links.at(0);
+			if (!(link?.link)) return;
+
+			// get target
+			var targetFile = this.tryGetLinkTarget(link.link, rFile.path);
+			if (!targetFile) return;
+			
+			// compare directory
+			if (targetFile.parent?.path != rFile.parent?.path) {
+				// need to report
+				var mdlink = this.generateMarkdownLink(rFile, reportFilePath);
+				reportText += mdlink + '\n\n'
+			}
+		})
+		// if there is any report, add a heading
+		if (reportText != emptyReportText) {
+			var heading = '# Redirect-Files are placed at incorrect directory\n' + 
+							'should put each besides its Target-File\n\n';
+			reportText = heading + reportText;
+		}
+		// return
+		return reportText;
+	}
+
+	async createReportFile(reportFilePath: string, reportText: string, emptyReportText: string) {
+		if (reportText == emptyReportText) {
+			new Notice("report finished, nothing to report");
+			return;
+		}
+		var reportFile = await app.vault.create(reportFilePath, reportText);
+		await this.openFile(reportFile);
+		new Notice("report finished, see report-file");
+	}
+
+	// don't forget suffix .md
+	tryGetFile(path: string): TFile | null {
+		var file: TFile | null = null;
+		var fileOrFolder = app.vault.getAbstractFileByPath(path);
+		if (!fileOrFolder) return null;
+		if (fileOrFolder instanceof TFile) {
+			file = fileOrFolder;
+		}
+		return file;
+	}
+
+	tryGetDirectory(path: string): TFolder | null {
+		var folder: TFolder | null = null;
+		var fileOrFolder = app.vault.getAbstractFileByPath(path);
+		if (!fileOrFolder) return null;
+		if (fileOrFolder instanceof TFolder) {
+			folder = fileOrFolder;
+		}
+		return folder;
+	}
+
+	tryGetLinks(file: TFile): LinkCache[] | null {
+		var metadata = this.tryGetFileMetadata(file);
+		if (!metadata) return null;
+		var links = metadata.links;
+		if (!links || links.length == 0) return null;
+		return links;
+	}
+
+	tryGetFileMetadata(file: TFile): CachedMetadata | null {
+		return app.metadataCache.getFileCache(file);
+	}
+
+	// the files that link to current file
+	// [How to get backlinks for a file?](https://forum.obsidian.md/t/how-to-get-backlinks-for-a-file/45314/1)
+	// very expensive (2023.11.03)
+	// is the API async? if it is, should await
+	tryGetBackFiles_useHiddenAPIs(file: TFile): Array<TFile> {
+		var backFiles: Array<TFile> = [];
+		var metadataCache: any = app.metadataCache;
+		var backlinksContainer = metadataCache.getBacklinksForFile(file);
+		backlinksContainer = backlinksContainer.data;
+		Object.keys(backlinksContainer).forEach((filePath) => {
+			var backFile = this.tryGetFile(filePath);
+			if (!backFile) return;
+			backFiles.push(backFile);
+		})
+		return backFiles;
+	}
+
+	// the links towards current file
+	// [How to get backlinks for a file?](https://forum.obsidian.md/t/how-to-get-backlinks-for-a-file/45314/1)
+	// very expensive (2023.11.03)
+	// is the API async? if it is, should await
+	tryGetBacklinks_useHiddenAPIs(file: TFile): Array<LinkCache> {
+		var backlinks: Array<LinkCache> = [];
+		var metadataCache: any = app.metadataCache;
+		var backlinksContainer = metadataCache.getBacklinksForFile(file);
+		backlinksContainer = backlinksContainer.data;
+		Object.keys(backlinksContainer).forEach((filePath) => {
+			var backlinks0: Array<LinkCache> = backlinksContainer[filePath];
+			backlinks0.forEach((backlink) => {
+				backlinks.push(backlink);
+			})
+		})
+		return backlinks;
+	}
+
+	// at current file, try to get the target of link
+	tryGetLinkTarget(link: string, pathOfCurrentFile: string): TFile | null {
+		return app.metadataCache.getFirstLinkpathDest(link, pathOfCurrentFile);
+	}
+
+	// at current file, generate the markdown link of target file
+	generateMarkdownLink(targetFile: TFile, pathOfCurrentFile: string): string {
+		return app.fileManager.generateMarkdownLink(targetFile, pathOfCurrentFile);
+	}
+
+	// [Move file to other locations dynamically using callbacks](https://forum.obsidian.md/t/move-file-to-other-locations-dynamically-using-callbacks/64334)
+	// change the path
+	async moveOrRename_fileOrDirectory(fileOrDirectory: TAbstractFile, newPath: string) {
+		await app.fileManager.renameFile(fileOrDirectory, newPath);
+	}
+
+	// [Workspace](https://docs.obsidian.md/Plugins/User+interface/Workspace)
+	// [Workspace class](https://docs.obsidian.md/Reference/TypeScript+API/Workspace)
+	// [Workspace.getLeaf() method](https://docs.obsidian.md/Reference/TypeScript+API/workspace/getLeaf_1)
+	// split display all the childs
+	// tabs display one of childs, at any moment
 	async openFile(
 		file: TFile
 	) {
 		let leaf: WorkspaceLeaf;
-	
+
 		// open file in new tab
 		leaf = app.workspace.getLeaf('tab');
 		await leaf.openFile(file);
@@ -120,5 +471,382 @@ export default class RedirectorPlugin extends Plugin {
 		});
 	}
 
+	concatDirectoryPathAndFileName(dirPath: string, fileName: string): string {
+		var concated: string = '';
+		// get path separator & normalize path
+		var sep = this.getPathSeparator();
+		var dirPathAsPrefix = normalizePath(dirPath);
+		// is root dir?
+		var rootDir = false;
+		if (dirPathAsPrefix == '' || dirPathAsPrefix == sep) {
+			rootDir = true;
+		}
+		// prepare prefix, the dir path
+		if (rootDir) {
+			dirPathAsPrefix = '';
+		} else {
+			if (!dirPathAsPrefix.endsWith(sep)) {
+				dirPathAsPrefix += sep;
+			}
+		}
+		// concat & normalize
+		concated = normalizePath(dirPathAsPrefix + fileName);
+		// return
+		return concated;
+	}
+
+	sep: string = '';
+
+	getPathSeparator() {
+		if (this.sep == '') {
+			this.sep = normalizePath('/');
+			// if normalizePath() do NOT tell me the separator
+			if (this.sep == '') this.sep = '/';
+			// check it before return
+			if (!['/', '\\'].includes(this.sep)) {
+				throw new Error('the accquired path-separator is strange, it\'s ' + this.sep + ' , so stop the execution');
+			}
+		}
+		return this.sep;
+	}
+
+	// cached
+	// sep str to lines
+	strToLinesMap_cache: Map<string, string[]> = new Map();
+	cachedStrToLines(str: string, removeSeparatorFromLines: boolean = true, separators : string[]= ['\r\n', '\n']) {
+		// return from cache if exist
+		var cachedOrNull = this.strToLinesMap_cache.get(str);
+		if (cachedOrNull) return cachedOrNull;
+
+		// do compute
+		return this.strToLines(str, removeSeparatorFromLines, separators);
+	}
+
+	// remove from the cache
+	removeCacheFromCachedStrToLines(str: string) {
+		this.strToLinesMap_cache.delete(str);
+	}
+
+	// sep str to lines
+	strToLines(str: string, removeSeparatorFromLines: boolean = true, separators : string[]= ['\r\n', '\n']): string[] {
+		// sort sep from long to short
+		separators.sort((sep1, sep2) => {
+			return sep1.length - sep2.length;
+		});
+		return this.strToLinesBody(str, 0, separators, removeSeparatorFromLines);
+	}
+
+	// sep str-from-a-index to lines
+	private strToLinesBody(str: string, strStartIdx: number, separators : string[], removeSeparator: boolean, lines: string[] = []): string[] {
+		// try to find next sep in each substr
+		var isFoundSep = false;
+		var prefix = '';  // includes sep or NOT, depends
+		var theFoundSep = '';
+		var suffixStartIdx = -1;  // NOT includes sep
+		for(var i=strStartIdx; i<str.length; i++) {
+			// each substr, is the str starts from i
+			// is there a sep?
+			for(var j=0; j<separators.length; j++) {
+				// each sep
+				var sep = separators[j];
+				if (str.startsWith(sep, i)) {
+					var sepStartIdx = i;
+					var sepEndIdxExclusive = sepStartIdx + sep.length;
+					isFoundSep = true;
+					if (removeSeparator)
+						prefix = str.substring(strStartIdx, sepStartIdx);
+					else
+						prefix = str.substring(strStartIdx, sepEndIdxExclusive);
+					theFoundSep = sep;
+					suffixStartIdx = sepEndIdxExclusive;
+					break;
+				}
+			}
+			if (isFoundSep) break;
+		}
+
+		// if NOT found next sep then
+		if (!isFoundSep) {
+			lines.push(str.substring(strStartIdx));
+			return lines;
+		}
+		
+		// found the sep
+		lines.push(prefix);
+		return this.strToLinesBody(str, suffixStartIdx, separators, removeSeparator, lines);
+	}
+
+	standardSeparator: string = '\n';
+	linesToStr(strArr: string[]): string {
+		var combined = '';
+		strArr.forEach((str, idx) => {
+			if (idx == 0)
+				combined += str;
+			else
+				combined += this.standardSeparator + str;
+		})
+		return combined;
+	}
+
+	sortLinksFromTailToHead(pairs: MisleadingLinkAndRealTarget[]): MisleadingLinkAndRealTarget[] {
+		var sorted = pairs.sort((a, b) => {
+			var apos = a.misleadingLink.position;
+			var bpos = b.misleadingLink.position;
+			if (apos.end <= bpos.start) {
+				return -1;
+			} else if (bpos.end <= apos.start) {
+				return 1;
+			} else {
+				this.reportError('fail to sort links');
+				return 0;
+			}
+		})
+		return sorted;
+	}
+
+	// return how many links is changed
+	async replaceLinksInFile(pairs: MisleadingLinkAndRealTarget[], file: TFile, log: boolean = true): Promise<number> {
+		var linksChanged = 0;
+		var oldLinks: string[] = [];
+		var newLinks: string[] = [];
+
+		pairs = this.sortLinksFromTailToHead(pairs);
+
+		await this.updateFile(file, (content) => {
+			var newContent = content;
+			var lines = this.strToLines(newContent);
+			pairs.forEach((pair) => {
+				var link = pair.misleadingLink;
+				var newTarget = pair.realTarget;
+
+				// link info
+				var linkStart = link.position.start;
+				var linkEnd = link.position.end;
+				var linkContent = link.original;
+				var newLink = pair.getRealMarkdownLink();
+				if (newLink == linkContent) return;
+
+				// try found link in lines
+				var tryFoundLine = lines[linkStart.line];
+				var tryFound = tryFoundLine.substring(linkStart.col, linkEnd.col);
+				if (tryFound != linkContent) {
+					console.log(link);
+					this.reportError('can NOT locate link in file, \n' + 
+						`file ${file.name}\n` + 
+						`filepath ${file.path}\n` + 
+						`expect ${linkContent}\n` + 
+						`found ${tryFound}`, 
+						false);
+					return;
+				}
+	
+				// has found link in content
+				var foundLine = tryFoundLine;
+				var found = tryFound;
+				var prefix = foundLine.substring(0, linkStart.col);
+				var suffix = foundLine.substring(linkEnd.col);
+				
+				// get new line
+				var newLine = prefix + newLink + suffix;
+
+				// replace in lines
+				lines[linkStart.line] = newLine;
+
+				// others
+				linksChanged++;
+				oldLinks.push(linkContent);
+				newLinks.push(newLink);
+			});
+
+			newContent = this.linesToStr(lines);
+			return newContent;
+		});
+
+		// log
+		if (log) {
+			if (linksChanged > 0) {
+				console.log('\n+++++ File Changed Log Start ++++++++++++++++')
+				console.log(
+					'\n' + 
+					`filename: ${file.name}\n` + 
+					`filepath: ${file.path}\n` + 
+					`countLinksChanged = ${linksChanged}`);
+				var detailedLinksChangeLog = '';
+				for(var i=0; i<linksChanged; i++) {
+					detailedLinksChangeLog += `\n- oldLink: ${oldLinks[i]}`;
+					detailedLinksChangeLog += `\n  - newLink: ${newLinks[i]}`;
+				}
+				console.log(detailedLinksChangeLog);
+				console.log('\n------------- File Changed Log End -----')
+			}
+		}
+
+		return linksChanged;
+	}
+
+	tryGetRedirectFileTarget(redirectFile: TFile): TFile | null {
+		var metadata = this.tryGetFileMetadata(redirectFile);
+		if (!metadata) return null;
+
+		var links = metadata.links;
+		if (!links || links.length == 0) return null;
+
+		var link: LinkCache = links[0];
+		var linkStr = link.link;
+
+		var linkTarget = this.tryGetLinkTarget(linkStr, redirectFile.path);
+		if (!linkTarget) return null;
+
+		return linkTarget;
+	}
+
+	async replaceLinksToRedirectFilesWithLinksToItsTarget(redirectFiles: TFile[]): Promise<number> {
+			var path2OneOfMap = this.getPath2OneOfMap(redirectFiles);
+			// check each file
+			var mdfiles = app.vault.getMarkdownFiles();
+			var mdfilesIterator = mdfiles.values();
+			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
+				mdfilesIterator, 
+				path2OneOfMap);
+	}
+
+	// return count of modified file
+	async replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
+							mdfilesIterator: IterableIterator<TFile>, 
+							path2OneOfMap: Map<string, boolean>): Promise<number> {
+		var nextElementContainer = mdfilesIterator.next();
+		if (nextElementContainer.done) return 0;
+		var file: TFile = nextElementContainer.value;
+
+		// find badlinks in links
+		var pairs: MisleadingLinkAndRealTarget[] = [];
+		this.tryGetFileMetadata(file)?.links?.forEach((link, idx, links) => {
+			var targetFile = this.tryGetLinkTarget(link.link, file.path);
+			if (!targetFile) return;
+			var targetPath = targetFile.path;
+
+			// if good link then return
+			var targetIsRedirectFile = false;
+			if (path2OneOfMap.get(targetPath)) targetIsRedirectFile = true;
+			if (!targetIsRedirectFile) return;
+
+			// need to fix this link
+			var redirectFile: TFile = targetFile;
+			var realTarget = this.tryGetRedirectFileTarget(redirectFile);
+			if (!realTarget) return;
+
+			// output found bad links
+			var pair = new MisleadingLinkAndRealTarget(file, link, realTarget, this);
+			pairs.push(pair);
+		})
+
+		// replace if any bad
+		if (pairs.length != 0) {
+			// replace
+			var linksChanged = await this.replaceLinksInFile(pairs, file);
+			var filesChanged = linksChanged >= 1 ? 1 : 0;
+			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
+				mdfilesIterator, 
+				path2OneOfMap
+			) + filesChanged;
+		} else {
+			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
+				mdfilesIterator, 
+				path2OneOfMap
+			);
+		}
+	}
+
+	// return count of modified file
+	async refreshAllLinks(): Promise<number> {
+		var mdfiles = app.vault.getMarkdownFiles();
+		var mdfilesIterator = mdfiles.values();
+		return await this.refreshAllLinks_recurse(mdfilesIterator);
+	}
+
+	async refreshAllLinks_recurse(mdfilesIterator: IterableIterator<TFile>): Promise<number> {
+		var nextElementContainer = mdfilesIterator.next();
+		if (nextElementContainer.done) return 0;
+		var file: TFile = nextElementContainer.value;
+
+		var links = this.tryGetLinks(file);
+		if (!links || links.length == 0) {
+			return await this.refreshAllLinks_recurse(mdfilesIterator);
+		}
+
+		var pairs: MisleadingLinkAndRealTarget[] = [];
+		links.forEach((link) => {
+			var targetFile = this.tryGetLinkTarget(link.link, file.path);
+			if (!targetFile) return;
+			var pair = new MisleadingLinkAndRealTarget(file, link, targetFile, this);
+			if (!pair.isNeedUpdate()) return;
+			pairs.push(pair);
+		})
+
+		if (pairs.length != 0) {
+			var linksChanged = await this.replaceLinksInFile(pairs, file);
+			var filesChanged = linksChanged >= 1 ? 1 : 0;
+			return await this.refreshAllLinks_recurse(mdfilesIterator) + filesChanged;
+		} else {
+			return await this.refreshAllLinks_recurse(mdfilesIterator);
+		}
+	}
+
+	async updateFile(file: TFile, callback: (content: string) => string) {
+		await app.vault.process(file, callback);
+	}
+
+	async readFile(file: TFile): Promise<string> {
+		return await app.vault.read(file);
+	}
+
+	async writeFile(file: TFile, data: string) {
+		await app.vault.modify(file, data);
+	}
+
+	reportError(message: string, throwError: boolean = true) {
+		new Notice(message);
+		new Notice('see more log in console, \n' + 'Ctrl+Shift+I to open console');
+		console.log('=========== Error Report Start ===========');
+		console.log(message);
+		console.trace();
+		if (throwError)
+			throw new Error(message);
+	}
+
+	// await me to immediately return a async-function
 	async idle() {}
+
+	// TODO remove
+	async test() {
+		try {
+			new Notice('this is redirector');
+		} catch(err) {
+			console.log(err);
+		}
+	}
+}
+
+class MisleadingLinkAndRealTarget {
+	readonly currentFile: TFile;
+	readonly misleadingLink: LinkCache;
+	readonly realTarget: TFile;
+	readonly plugin: RedirectorPlugin;
+
+	constructor(currentFile: TFile, misleadingLink: LinkCache, realTarget: TFile, plugin: RedirectorPlugin) {
+		this.currentFile = currentFile;
+		this.misleadingLink = misleadingLink;
+		this.realTarget = realTarget;
+		this.plugin = plugin;
+	}
+
+	getRealMarkdownLink(): string {
+		return this.plugin.generateMarkdownLink(this.realTarget, this.currentFile.path);
+	}
+
+	isNeedUpdate(): boolean {
+		var real = this.getRealMarkdownLink();
+		var prev = this.misleadingLink.original;
+		return real != prev;
+	}
 }
