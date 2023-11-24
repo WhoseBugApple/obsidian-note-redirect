@@ -1,9 +1,9 @@
 {
 	"id": "obsidian-redirector",
 	"name": "Redirector",
-	"version": "0.0.1",
-	"minAppVersion": "1.3.5",
-	"description": "Auto redirect from redirect-file to target-file.",
+	"version": "0.1.0",
+	"minAppVersion": "1.4.16",
+	"description": "Manage redirect-files",
 	"author": "KORC",
 	"isDesktopOnly": true
 }

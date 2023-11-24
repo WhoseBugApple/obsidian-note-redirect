@@ -1,5 +1,7 @@
 import { link, readFile } from 'fs';
-import { App, CachedMetadata, Editor, EditorPosition, EditorSuggest, EditorSuggestContext, EditorSuggestTriggerInfo, FileManager, LinkCache, MarkdownView, MetadataCache, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, TFolder, TagCache, Vault, WorkspaceLeaf, normalizePath, parseFrontMatterEntry } from 'obsidian';
+import { url } from 'inspector';
+import { App, CachedMetadata, Editor, EditorPosition, EditorSuggest, EditorSuggestContext, EditorSuggestTriggerInfo, FileManager, LinkCache, MarkdownView, MetadataCache, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, TFolder, TagCache, Vault, Workspace, WorkspaceLeaf, WorkspaceWindow, normalizePath, parseFrontMatterEntry } from 'obsidian';
+import { report } from 'process';
 
 // References
 //   general
@@ -9,10 +11,28 @@ import { App, CachedMetadata, Editor, EditorPosition, EditorSuggest, EditorSugge
 //   file
 //     [Vault](https://docs.obsidian.md/Plugins/Vault)
 //     [Vault class](https://docs.obsidian.md/Reference/TypeScript+API/Vault)
-//     edit active file
-//       replace in active markdown file in edit mode
-//         [Editor](https://docs.obsidian.md/Plugins/Editor/Editor)
-//         [Editor class](https://docs.obsidian.md/Reference/TypeScript+API/Editor)
+//     access metadata
+//       [getFileCache](https://docs.obsidian.md/Reference/TypeScript+API/metadatacache/getFileCache)
+//     access file view (source and preview)
+//       const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+//       access source view (edit view)
+//         access text
+//           [Editor](https://docs.obsidian.md/Plugins/Editor/Editor)
+//             read and modify text
+//           [Editor class](https://docs.obsidian.md/Reference/TypeScript+API/Editor)
+//         access html
+//           view.containerEl  (includes content and file-name)
+//           view.contentEl
+//       access preview view (reading view)
+//         access html
+//           view.containerEl  (includes content and file-name)
+//           view.contentEl
+//           [Markdown post processing](https://docs.obsidian.md/Plugins/Editor/Markdown+post+processing)
+//             a post-processor of preview view
+//             when open a preview view, it's called
+//             can NOT get source view html-elements
+//   callback
+//     [Workspace class](https://docs.obsidian.md/Reference/TypeScript+API/Workspace)
 
 export default class RedirectorPlugin extends Plugin {
 	async onload() {
@@ -55,7 +75,7 @@ export default class RedirectorPlugin extends Plugin {
 	}
 
 	onunload() {
-
+		
 	}
 
 	reportName: string = "redirect-files report.md";
@@ -167,7 +187,7 @@ export default class RedirectorPlugin extends Plugin {
 	}
 
 	getRedirectFiles(): TFile[] {
-		var redirectFiles: TFile[] = app.vault.getMarkdownFiles().filter((file, idx, files) => {
+		var redirectFiles: TFile[] = this.getMarkdownFiles().filter((file, idx, files) => {
 			var someTagSatisfy = this.tryGetFileMetadata(file)?.tags?.some((tag, idx, tags) => {
 				return tag.tag.toLowerCase() == "#redirect";
 			});
@@ -199,8 +219,7 @@ export default class RedirectorPlugin extends Plugin {
 	}
 
 	async removeReportFile(reportFilePath: string) {
-		var file = this.tryGetFile(reportFilePath);
-		if (file) await app.vault.delete(file);
+		await this.deleteFileIfExist(reportFilePath);
 	}
 
 	async getReportText(
@@ -225,7 +244,7 @@ export default class RedirectorPlugin extends Plugin {
 		var path2OneOfMap = this.getPath2OneOfMap(redirectFiles);
 		// check each file
 		var badFileId = 0;
-		app.vault.getMarkdownFiles().forEach((file, idx, files) => {
+		this.getMarkdownFiles().forEach((file, idx, files) => {
 			var reportForThisFile = emptyReportText;
 			// check each link
 			this.tryGetFileMetadata(file)?.links?.forEach((link, idx, links) => {
@@ -353,15 +372,19 @@ export default class RedirectorPlugin extends Plugin {
 			new Notice("report finished, nothing to report");
 			return;
 		}
-		var reportFile = await app.vault.create(reportFilePath, reportText);
+		var reportFile = await this.createFile(reportFilePath, reportText);
 		await this.openFile(reportFile);
 		new Notice("report finished, see report-file");
+	}
+
+	getMarkdownFiles(): TFile[] {
+		return this.getVault().getMarkdownFiles();
 	}
 
 	// don't forget suffix .md
 	tryGetFile(path: string): TFile | null {
 		var file: TFile | null = null;
-		var fileOrFolder = app.vault.getAbstractFileByPath(path);
+		var fileOrFolder = this.getVault().getAbstractFileByPath(path);
 		if (!fileOrFolder) return null;
 		if (fileOrFolder instanceof TFile) {
 			file = fileOrFolder;
@@ -371,7 +394,7 @@ export default class RedirectorPlugin extends Plugin {
 
 	tryGetDirectory(path: string): TFolder | null {
 		var folder: TFolder | null = null;
-		var fileOrFolder = app.vault.getAbstractFileByPath(path);
+		var fileOrFolder = this.getVault().getAbstractFileByPath(path);
 		if (!fileOrFolder) return null;
 		if (fileOrFolder instanceof TFolder) {
 			folder = fileOrFolder;
@@ -379,6 +402,8 @@ export default class RedirectorPlugin extends Plugin {
 		return folder;
 	}
 
+	// if at least 1 link, return links, 
+	// else return null
 	tryGetLinks(file: TFile): LinkCache[] | null {
 		var metadata = this.tryGetFileMetadata(file);
 		if (!metadata) return null;
@@ -388,7 +413,7 @@ export default class RedirectorPlugin extends Plugin {
 	}
 
 	tryGetFileMetadata(file: TFile): CachedMetadata | null {
-		return app.metadataCache.getFileCache(file);
+		return this.getMetadataCache().getFileCache(file);
 	}
 
 	// the files that link to current file
@@ -397,7 +422,7 @@ export default class RedirectorPlugin extends Plugin {
 	// is the API async? if it is, should await
 	tryGetBackFiles_useHiddenAPIs(file: TFile): Array<TFile> {
 		var backFiles: Array<TFile> = [];
-		var metadataCache: any = app.metadataCache;
+		var metadataCache: any = this.getMetadataCache();
 		var backlinksContainer = metadataCache.getBacklinksForFile(file);
 		backlinksContainer = backlinksContainer.data;
 		Object.keys(backlinksContainer).forEach((filePath) => {
@@ -414,7 +439,7 @@ export default class RedirectorPlugin extends Plugin {
 	// is the API async? if it is, should await
 	tryGetBacklinks_useHiddenAPIs(file: TFile): Array<LinkCache> {
 		var backlinks: Array<LinkCache> = [];
-		var metadataCache: any = app.metadataCache;
+		var metadataCache: any = this.getMetadataCache();
 		var backlinksContainer = metadataCache.getBacklinksForFile(file);
 		backlinksContainer = backlinksContainer.data;
 		Object.keys(backlinksContainer).forEach((filePath) => {
@@ -428,18 +453,38 @@ export default class RedirectorPlugin extends Plugin {
 
 	// at current file, try to get the target of link
 	tryGetLinkTarget(link: string, pathOfCurrentFile: string): TFile | null {
-		return app.metadataCache.getFirstLinkpathDest(link, pathOfCurrentFile);
+		return this.getMetadataCache().getFirstLinkpathDest(link, pathOfCurrentFile);
 	}
 
 	// at current file, generate the markdown link of target file
 	generateMarkdownLink(targetFile: TFile, pathOfCurrentFile: string): string {
-		return app.fileManager.generateMarkdownLink(targetFile, pathOfCurrentFile);
+		return this.getFileManager().generateMarkdownLink(targetFile, pathOfCurrentFile);
 	}
 
 	// [Move file to other locations dynamically using callbacks](https://forum.obsidian.md/t/move-file-to-other-locations-dynamically-using-callbacks/64334)
 	// change the path
 	async moveOrRename_fileOrDirectory(fileOrDirectory: TAbstractFile, newPath: string) {
-		await app.fileManager.renameFile(fileOrDirectory, newPath);
+		await this.getFileManager().renameFile(fileOrDirectory, newPath);
+	}
+
+	async deleteFileIfExist(path: string) {
+		var file = this.tryGetFile(path);
+		if (!file) return;
+		await this.getVault().delete(file);
+	}
+
+	// delete a exist file
+	async deleteFile(path: string) {
+		var file = this.tryGetFile(path);
+		if (!file) {
+			this.reportLog('can NOT find file', true, false);
+			throw new Error('report error');
+		}
+		await this.getVault().delete(file);
+	}
+
+	async createFile(path: string, content: string) {
+		return await this.getVault().create(path, content);
 	}
 
 	// [Workspace](https://docs.obsidian.md/Plugins/User+interface/Workspace)
@@ -453,11 +498,11 @@ export default class RedirectorPlugin extends Plugin {
 		let leaf: WorkspaceLeaf;
 
 		// open file in new tab
-		leaf = app.workspace.getLeaf('tab');
+		leaf = this.getWorkspace().getLeaf('tab');
 		await leaf.openFile(file);
 	
 		// focus
-		app.workspace.setActiveLeaf(leaf, { focus: true });
+		this.getWorkspace().setActiveLeaf(leaf, { focus: true });
 	
 		// source view
 		const leafViewState = leaf.getViewState();
@@ -597,7 +642,7 @@ export default class RedirectorPlugin extends Plugin {
 			} else if (bpos.end <= apos.start) {
 				return 1;
 			} else {
-				this.reportError('fail to sort links');
+				this.reportLog('fail to sort links');
 				return 0;
 			}
 		})
@@ -631,7 +676,7 @@ export default class RedirectorPlugin extends Plugin {
 				var tryFound = tryFoundLine.substring(linkStart.col, linkEnd.col);
 				if (tryFound != linkContent) {
 					console.log(link);
-					this.reportError('can NOT locate link in file, \n' + 
+					this.reportLog('can NOT locate link in file, \n' + 
 						`file ${file.name}\n` + 
 						`filepath ${file.path}\n` + 
 						`expect ${linkContent}\n` + 
@@ -703,7 +748,7 @@ export default class RedirectorPlugin extends Plugin {
 	async replaceLinksToRedirectFilesWithLinksToItsTarget(redirectFiles: TFile[]): Promise<number> {
 			var path2OneOfMap = this.getPath2OneOfMap(redirectFiles);
 			// check each file
-			var mdfiles = app.vault.getMarkdownFiles();
+			var mdfiles = this.getMarkdownFiles();
 			var mdfilesIterator = mdfiles.values();
 			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
 				mdfilesIterator, 
@@ -757,9 +802,10 @@ export default class RedirectorPlugin extends Plugin {
 		}
 	}
 
+	// regenerate all links
 	// return count of modified file
 	async refreshAllLinks(): Promise<number> {
-		var mdfiles = app.vault.getMarkdownFiles();
+		var mdfiles = this.getMarkdownFiles();
 		var mdfilesIterator = mdfiles.values();
 		return await this.refreshAllLinks_recurse(mdfilesIterator);
 	}
@@ -792,24 +838,48 @@ export default class RedirectorPlugin extends Plugin {
 		}
 	}
 
-	async updateFile(file: TFile, callback: (content: string) => string) {
-		await app.vault.process(file, callback);
+	async updateFile(file: TFile, callback: (fileContent: string) => string) {
+		await this.getVault().process(file, callback);
 	}
 
 	async readFile(file: TFile): Promise<string> {
-		return await app.vault.read(file);
+		return await this.getVault().read(file);
 	}
 
 	async writeFile(file: TFile, data: string) {
-		await app.vault.modify(file, data);
+		await this.getVault().modify(file, data);
 	}
 
-	reportError(message: string, throwError: boolean = true) {
-		new Notice(message);
-		new Notice('see more log in console, \n' + 'Ctrl+Shift+I to open console');
-		console.log('=========== Error Report Start ===========');
-		console.log(message);
-		console.trace();
+	getApp(): App {
+		return this.app;
+	}
+
+	getWorkspace(): Workspace {
+		return this.getApp().workspace;
+	}
+
+	getVault(): Vault {
+		return this.getApp().vault;
+	}
+
+	getFileManager(): FileManager {
+		return this.getApp().fileManager;
+	}
+
+	getMetadataCache(): MetadataCache {
+		return this.getApp().metadataCache;
+	}
+
+	reportLog(message: string, throwError: boolean = true, toastsNotice: boolean = true, logConsole: boolean = true) {
+		if (logConsole) {
+			console.log('=========== Report Start ===========');
+			console.log(message);
+			console.trace();
+		}
+		if (toastsNotice) {
+			new Notice(message);
+			new Notice('see more log in console, \n' + 'Ctrl+Shift+I to open console');
+		}
 		if (throwError)
 			throw new Error(message);
 	}
@@ -821,6 +891,7 @@ export default class RedirectorPlugin extends Plugin {
 	async test() {
 		try {
 			new Notice('this is redirector');
+			// console.clear();
 		} catch(err) {
 			console.log(err);
 		}
