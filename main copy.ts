@@ -134,9 +134,13 @@ export default class RedirectorPlugin extends Plugin {
 		// idle
 		await this.idle();
 
-		var filesChanged = await this.refreshAllLinks();
-		new Notice('format finished, ' + filesChanged + ' files are changed');
-		console.log(`${filesChanged} files are changed`);
+		try {
+			var filesChanged = await this.refreshAllLinks();
+			new Notice('format finished, ' + filesChanged + ' files are changed');
+			console.log(`${filesChanged} files are changed`);
+		} catch (e) {
+			console.log('format failed', e);
+		}
 		return;
 	}
 
@@ -807,7 +811,7 @@ export default class RedirectorPlugin extends Plugin {
 	async refreshAllLinks(): Promise<number> {
 		var mdfiles = this.getMarkdownFiles();
 		var mdfilesIterator = mdfiles.values();
-		return await this.refreshAllLinks_recurse(mdfilesIterator);
+		return await this.refreshAllLinks_loop(mdfilesIterator);
 	}
 
 	async refreshAllLinks_recurse(mdfilesIterator: IterableIterator<TFile>): Promise<number> {
@@ -836,6 +840,40 @@ export default class RedirectorPlugin extends Plugin {
 		} else {
 			return await this.refreshAllLinks_recurse(mdfilesIterator);
 		}
+	}
+
+	async refreshAllLinks_loop(mdfilesIterator: IterableIterator<TFile>): Promise<number> {
+		var count: number = 0;
+
+		while(true) {
+			var nextElementContainer = mdfilesIterator.next();
+			if (nextElementContainer.done) break;
+			var file: TFile = nextElementContainer.value;
+	
+			var links = this.tryGetLinks(file);
+			if (!links || links.length == 0) {
+				continue;
+			}
+	
+			var pairs: MisleadingLinkAndRealTarget[] = [];
+			links.forEach((link) => {
+				var targetFile = this.tryGetLinkTarget(link.link, file.path);
+				if (!targetFile) return;
+				var pair = new MisleadingLinkAndRealTarget(file, link, targetFile, this);
+				if (!pair.isNeedUpdate()) return;
+				pairs.push(pair);
+			})
+	
+			if (pairs.length != 0) {
+				var linksChanged = await this.replaceLinksInFile(pairs, file);
+				var filesChanged = linksChanged >= 1 ? 1 : 0;
+				count += filesChanged;
+			}
+
+			continue;
+		}
+
+		return count;
 	}
 
 	async updateFile(file: TFile, callback: (fileContent: string) => string) {
