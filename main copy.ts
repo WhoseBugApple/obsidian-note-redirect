@@ -57,13 +57,6 @@ export default class RedirectorPlugin extends Plugin {
 				this.command_replaceLinksToRedirectFileWithLinksToItsTarget();
 			}
 		});
-		this.addCommand({
-			id: 'redirector-format-links',
-			name: 'Format links',
-			callback: () => {
-				this.command_formatLinks();
-			}
-		});
 		// TODO remove
 		this.addCommand({
 			id: 'redirector-test',
@@ -127,21 +120,6 @@ export default class RedirectorPlugin extends Plugin {
 		// replace
 		var count = await this.replaceLinksToRedirectFilesWithLinksToItsTarget(redirectFiles);
 		new Notice('replace finished, ' + count + ' files are replaced');
-	}
-
-	// TODO optimize
-	async command_formatLinks() {
-		// idle
-		await this.idle();
-
-		try {
-			var filesChanged = await this.refreshAllLinks();
-			new Notice('format finished, ' + filesChanged + ' files are changed');
-			console.log(`${filesChanged} files are changed`);
-		} catch (e) {
-			console.log('format failed', e);
-		}
-		return;
 	}
 
 	// TODO remove
@@ -754,126 +732,57 @@ export default class RedirectorPlugin extends Plugin {
 			// check each file
 			var mdfiles = this.getMarkdownFiles();
 			var mdfilesIterator = mdfiles.values();
-			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
+			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_loop(
 				mdfilesIterator, 
 				path2OneOfMap);
 	}
 
 	// return count of modified file
-	async replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
+	async replaceLinksToRedirectFilesWithLinksToItsTarget_loop(
 							mdfilesIterator: IterableIterator<TFile>, 
 							path2OneOfMap: Map<string, boolean>): Promise<number> {
-		var nextElementContainer = mdfilesIterator.next();
-		if (nextElementContainer.done) return 0;
-		var file: TFile = nextElementContainer.value;
+		var countModifiedFile = 0;
 
-		// find badlinks in links
-		var pairs: MisleadingLinkAndRealTarget[] = [];
-		this.tryGetFileMetadata(file)?.links?.forEach((link, idx, links) => {
-			var targetFile = this.tryGetLinkTarget(link.link, file.path);
-			if (!targetFile) return;
-			var targetPath = targetFile.path;
-
-			// if good link then return
-			var targetIsRedirectFile = false;
-			if (path2OneOfMap.get(targetPath)) targetIsRedirectFile = true;
-			if (!targetIsRedirectFile) return;
-
-			// need to fix this link
-			var redirectFile: TFile = targetFile;
-			var realTarget = this.tryGetRedirectFileTarget(redirectFile);
-			if (!realTarget) return;
-
-			// output found bad links
-			var pair = new MisleadingLinkAndRealTarget(file, link, realTarget, this);
-			pairs.push(pair);
-		})
-
-		// replace if any bad
-		if (pairs.length != 0) {
-			// replace
-			var linksChanged = await this.replaceLinksInFile(pairs, file);
-			var filesChanged = linksChanged >= 1 ? 1 : 0;
-			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
-				mdfilesIterator, 
-				path2OneOfMap
-			) + filesChanged;
-		} else {
-			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
-				mdfilesIterator, 
-				path2OneOfMap
-			);
-		}
-	}
-
-	// regenerate all links
-	// return count of modified file
-	async refreshAllLinks(): Promise<number> {
-		var mdfiles = this.getMarkdownFiles();
-		var mdfilesIterator = mdfiles.values();
-		return await this.refreshAllLinks_loop(mdfilesIterator);
-	}
-
-	async refreshAllLinks_recurse(mdfilesIterator: IterableIterator<TFile>): Promise<number> {
-		var nextElementContainer = mdfilesIterator.next();
-		if (nextElementContainer.done) return 0;
-		var file: TFile = nextElementContainer.value;
-
-		var links = this.tryGetLinks(file);
-		if (!links || links.length == 0) {
-			return await this.refreshAllLinks_recurse(mdfilesIterator);
-		}
-
-		var pairs: MisleadingLinkAndRealTarget[] = [];
-		links.forEach((link) => {
-			var targetFile = this.tryGetLinkTarget(link.link, file.path);
-			if (!targetFile) return;
-			var pair = new MisleadingLinkAndRealTarget(file, link, targetFile, this);
-			if (!pair.isNeedUpdate()) return;
-			pairs.push(pair);
-		})
-
-		if (pairs.length != 0) {
-			var linksChanged = await this.replaceLinksInFile(pairs, file);
-			var filesChanged = linksChanged >= 1 ? 1 : 0;
-			return await this.refreshAllLinks_recurse(mdfilesIterator) + filesChanged;
-		} else {
-			return await this.refreshAllLinks_recurse(mdfilesIterator);
-		}
-	}
-
-	async refreshAllLinks_loop(mdfilesIterator: IterableIterator<TFile>): Promise<number> {
-		var count: number = 0;
-
-		while(true) {
+		while (true) {
 			var nextElementContainer = mdfilesIterator.next();
 			if (nextElementContainer.done) break;
 			var file: TFile = nextElementContainer.value;
-	
-			var links = this.tryGetLinks(file);
-			if (!links || links.length == 0) {
-				continue;
-			}
-	
+
+			// find badlinks in links
 			var pairs: MisleadingLinkAndRealTarget[] = [];
-			links.forEach((link) => {
+			this.tryGetFileMetadata(file)?.links?.forEach((link, idx, links) => {
 				var targetFile = this.tryGetLinkTarget(link.link, file.path);
 				if (!targetFile) return;
-				var pair = new MisleadingLinkAndRealTarget(file, link, targetFile, this);
-				if (!pair.isNeedUpdate()) return;
+				var targetPath = targetFile.path;
+
+				// if good link then return
+				var targetIsRedirectFile = false;
+				if (path2OneOfMap.get(targetPath)) targetIsRedirectFile = true;
+				if (!targetIsRedirectFile) return;
+
+				// need to fix this link
+				var redirectFile: TFile = targetFile;
+				var realTarget = this.tryGetRedirectFileTarget(redirectFile);
+				if (!realTarget) return;
+
+				// output found bad links
+				var pair = new MisleadingLinkAndRealTarget(file, link, realTarget, this);
 				pairs.push(pair);
 			})
-	
+
+			// replace if any bad
 			if (pairs.length != 0) {
+				// replace
 				var linksChanged = await this.replaceLinksInFile(pairs, file);
 				var filesChanged = linksChanged >= 1 ? 1 : 0;
-				count += filesChanged;
+				countModifiedFile += filesChanged;
+				continue;
+			} else {
+				continue;
 			}
-
-			continue;
 		}
 
-		return count;
+		return countModifiedFile;
 	}
 
 	async updateFile(file: TFile, callback: (fileContent: string) => string) {
