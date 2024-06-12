@@ -1,9 +1,9 @@
 {
-	"id": "obsidian-redirector",
-	"name": "Redirector",
+	"id": "korc-note-redirect",
+	"name": "KORC Note Redirect",
 	"version": "0.1.0",
 	"minAppVersion": "1.4.16",
-	"description": "Manage redirect-files",
+	"description": "Utils improve redirecting notes",
 	"author": "KORC",
 	"isDesktopOnly": true
 }

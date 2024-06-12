@@ -71,7 +71,7 @@ export default class RedirectorPlugin extends Plugin {
 		
 	}
 
-	reportName: string = "redirect-files report.md";
+	reportName: string = "korc redirect-files report.md";
 	parentOfReport_path: string = "";
 	reportPath: string = this.parentOfReport_path + this.reportName;
 	async command_reportRedirectFiles() {
