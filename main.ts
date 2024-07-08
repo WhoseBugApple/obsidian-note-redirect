@@ -225,7 +225,7 @@ export default class RedirectorPlugin extends Plugin {
 		var reportText: string = emptyReportText;
 		var path2OneOfMap = this.getPath2OneOfMap(redirectFiles);
 		// check each file
-		var badFileId = 0;
+		var badFileId = 1;
 		this.getMarkdownFiles().forEach((file, idx, files) => {
 			var reportForThisFile = emptyReportText;
 			// check each link
